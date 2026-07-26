@@ -14,9 +14,20 @@ type in. Your readings are kept in your browser's local storage and nowhere else
 
 ## Use it
 
-1. In Claude Code, run `/usage`.
-2. Copy the two figures and their reset times into the page.
+1. Run `/usage` in Claude Code, or open **Usage** in the Claude app.
+2. Copy the two figures across. The reset boxes take them in the same shape those screens
+   show them, so there is nothing to convert:
+
+   | The app says | You type |
+   |---|---|
+   | Current session · 71% used · Resets in 4 hr 23 min | `71` · `4` hr `23` min |
+   | All models · 54% used · Resets Wed 08:00 | `54` · `Wednesday` `08:00` |
+
 3. Read your daily budget.
+
+A countdown is only true at the moment you type it, so it is pinned to an actual instant on
+submit. Reopen the form later and it restates what is left rather than replaying a stale
+"4 hr 23 min".
 
 That is the whole thing. Re-enter the numbers whenever you want a fresh reading — the page
 keeps counting down on its own in between, but usage only ever goes up, so an old reading
@@ -95,8 +106,8 @@ node test.mjs
 | File | Purpose |
 |---|---|
 | `index.html` | The page. Inline CSS and JS, no build step, no dependencies. |
-| `pacer.js` | The maths: `analyze()`, `planDays()`, `hourlyCost()`, formatting helpers. |
-| `test.mjs` | 32 assertions over the maths and its edge cases. |
+| `pacer.js` | The maths: `analyze()`, `planDays()`, `hourlyCost()`, reset-time parsing, formatting helpers. |
+| `test.mjs` | 40 assertions over the maths and its edge cases. |
 
 ## Hosting
 

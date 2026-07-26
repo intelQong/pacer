@@ -1,7 +1,8 @@
 // Run: node test.mjs
 import assert from "node:assert/strict";
 import {
-  analyze, planDays, hourlyCost, hoursFor, perDay, perHour, formatDuration, formatAge,
+  analyze, planDays, hourlyCost, hoursFor, resetInDuration, nextWeekdayAt,
+  perDay, perHour, formatDuration, formatAge,
   WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS,
 } from "./pacer.js";
 
@@ -217,6 +218,67 @@ check("the plan is capped so a bad reset date cannot spin forever", () => {
     maxDays: 14,
   });
   assert.equal(plan.length, 14);
+});
+
+// --- reset times entered the way the apps state them ----------------------
+check('"resets in 4 hr 23 min" becomes an instant', () => {
+  const at = resetInDuration({ hours: 4, minutes: 23, now: NOW });
+  assert.equal(at - NOW, (4 * 60 + 23) * 60 * 1000);
+});
+
+check("a blank hour or minute box counts as zero, not as broken input", () => {
+  assert.equal(resetInDuration({ hours: "", minutes: 45, now: NOW }) - NOW, 45 * 60000);
+  assert.equal(resetInDuration({ hours: 2, minutes: "", now: NOW }) - NOW, 2 * HOUR_MS);
+});
+
+check("a countdown of nothing at all is rejected", () => {
+  assert.equal(resetInDuration({ hours: 0, minutes: 0, now: NOW }), null);
+  assert.equal(resetInDuration({ hours: "", minutes: "", now: NOW }), null);
+  assert.equal(resetInDuration({ hours: "abc", minutes: 10, now: NOW }), null);
+  assert.equal(resetInDuration({ hours: -2, minutes: 10, now: NOW }), null);
+});
+
+// Local-time weekdays: Thu 15 Jan 2026, 12:00 local.
+const THU_NOON = new Date(2026, 0, 15, 12, 0, 0).getTime();
+const dayOf = (ms) => new Date(ms).getDay();
+
+check('"resets Wed 08:00" finds the coming Wednesday', () => {
+  const at = nextWeekdayAt({ weekday: 3, time: "08:00", now: THU_NOON });
+  assert.equal(dayOf(at), 3);
+  assert.equal(new Date(at).getHours(), 8);
+  // Thursday noon to next Wednesday morning is under a week.
+  assert.ok(at - THU_NOON < WEEK_MS && at > THU_NOON);
+});
+
+check("later today counts as today", () => {
+  const at = nextWeekdayAt({ weekday: 4, time: "18:00", now: THU_NOON });
+  assert.equal(new Date(at).getDate(), 15);
+  assert.equal(at - THU_NOON, 6 * HOUR_MS);
+});
+
+check("earlier today rolls to next week rather than into the past", () => {
+  const at = nextWeekdayAt({ weekday: 4, time: "09:00", now: THU_NOON });
+  assert.ok(at > THU_NOON);
+  assert.equal(at - THU_NOON, WEEK_MS - 3 * HOUR_MS);
+});
+
+check("a weekly reset always lands inside the seven day window", () => {
+  for (let wd = 0; wd < 7; wd++) {
+    const at = nextWeekdayAt({ weekday: wd, time: "08:00", now: THU_NOON });
+    assert.ok(at > THU_NOON, `weekday ${wd} must be ahead of now`);
+    assert.ok(at - THU_NOON <= WEEK_MS, `weekday ${wd} must be within a week`);
+    // So analyze() never rejects it as further out than the window is long.
+    assert.equal(analyze({ usedPct: 50, resetAt: at, windowMs: WEEK_MS, now: THU_NOON }).error, undefined);
+  }
+});
+
+check("a malformed weekday or time is rejected", () => {
+  assert.equal(nextWeekdayAt({ weekday: 7, time: "08:00", now: THU_NOON }), null);
+  assert.equal(nextWeekdayAt({ weekday: -1, time: "08:00", now: THU_NOON }), null);
+  assert.equal(nextWeekdayAt({ weekday: "", time: "08:00", now: THU_NOON }), null);
+  assert.equal(nextWeekdayAt({ weekday: 3, time: "", now: THU_NOON }), null);
+  assert.equal(nextWeekdayAt({ weekday: 3, time: "25:00", now: THU_NOON }), null);
+  assert.equal(nextWeekdayAt({ weekday: 3, time: "8am", now: THU_NOON }), null);
 });
 
 // --- percentages into hours -----------------------------------------------

@@ -112,6 +112,58 @@ function paceVerdict(budgetPerMs, burnPerMs) {
 export const perDay = (ratePerMs) => (ratePerMs === null ? null : ratePerMs * DAY_MS);
 export const perHour = (ratePerMs) => (ratePerMs === null ? null : ratePerMs * HOUR_MS);
 
+// Blank counts as zero; anything unparseable does not.
+function partOrNull(value) {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "string" && value.trim() === "") return 0;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/**
+ * Resolve a "resets in 4 hr 23 min" countdown into an absolute instant.
+ *
+ * The Claude app states the session reset as a duration rather than a clock
+ * time, so take it in that shape and pin it to a timestamp at entry. Storing
+ * the instant, not the duration, keeps the countdown honest afterwards.
+ */
+export function resetInDuration({ hours, minutes, now = Date.now() }) {
+  const h = partOrNull(hours);
+  const m = partOrNull(minutes);
+  if (h === null || m === null) return null;
+  const ms = (h * 60 + m) * MINUTE_MS;
+  if (ms <= 0) return null;
+  return now + ms;
+}
+
+/**
+ * Resolve "resets Wed 08:00" into the next instant matching that weekday and
+ * time. Today counts only if the time has not gone by yet, so the answer is
+ * always ahead of `now` and never more than a week out.
+ */
+export function nextWeekdayAt({ weekday, time, now = Date.now() }) {
+  // Number("") is 0, which would quietly turn an empty select into Sunday.
+  const blank =
+    weekday === null ||
+    weekday === undefined ||
+    (typeof weekday === "string" && weekday.trim() === "");
+  const wd = blank ? NaN : Number(weekday);
+  if (!Number.isInteger(wd) || wd < 0 || wd > 6) return null;
+
+  const parts = /^(\d{1,2}):(\d{2})$/.exec(String(time ?? "").trim());
+  if (!parts) return null;
+  const hh = Number(parts[1]);
+  const mm = Number(parts[2]);
+  if (hh > 23 || mm > 59) return null;
+
+  const target = new Date(now);
+  target.setHours(hh, mm, 0, 0);
+  let days = (wd - target.getDay() + 7) % 7;
+  if (days === 0 && target.getTime() <= now) days = 7; // already gone by today
+  target.setDate(target.getDate() + days);
+  return target.getTime();
+}
+
 /**
  * What one hour of actual use costs, as a share of the window.
  *
