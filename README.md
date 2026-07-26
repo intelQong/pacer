@@ -59,6 +59,23 @@ From there:
 | **Burned so far** | `used / elapsed` |
 | **Verdict** | budget rate vs. burn rate, with 5% tolerance either side of level |
 
+### Projections
+
+"On track for X%" extrapolates forward. Two rates can drive it:
+
+- the **average** since the window opened (`used ÷ elapsed`), used when there is only one reading
+- a **recent** rate, measured between the last two readings at least 15 minutes apart
+
+Either way the rate is applied only to the time **still ahead**, and added to what is already
+spent: `projected = used + rate × remaining`. What has gone is banked and cannot be
+re-forecast. (For the average rate this is algebraically the same as `used × window ÷ elapsed`;
+for a recent rate it is not, and multiplying a recent rate by the whole window would re-spend
+the past at the present rate — inflating a busy stretch and, after a quiet one, projecting a
+total lower than what is already used.)
+
+An hours-used count belongs to the week it was taken in, so it is dropped when the weekly
+window rolls over rather than being paired with fresh percentages.
+
 ### Getting an answer in hours
 
 Percentages do not convert to hours on their own. Elapsed wall-clock time cannot stand in for
@@ -121,7 +138,7 @@ node test.mjs
 |---|---|
 | `index.html` | The page. Inline CSS and JS, no build step, no dependencies. |
 | `pacer.js` | The maths: `analyze()`, `planDays()`, `hourlyCost()`, reset-time parsing, formatting helpers. |
-| `test.mjs` | 40 assertions over the maths and its edge cases. |
+| `test.mjs` | 68 assertions over the maths and its edge cases. |
 
 ## Hosting
 

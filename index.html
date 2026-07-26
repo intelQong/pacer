@@ -615,7 +615,7 @@ import {
 // Versioned so a cached pacer.js can never pair with a newer index.html. A
 // stale module means a missing export, which kills the whole page rather than
 // degrading it. Bump this whenever pacer.js changes.
-} from "./pacer.js?v=5";
+} from "./pacer.js?v=6";
 
 const STORE_KEY = "claude-pace/v1";
 const VIEW_KEY = "claude-pace/view";
@@ -808,9 +808,9 @@ function renderCard(win, reading, now, costPerHour) {
   const recent = recentRate(reading.history || [], windowStart);
   const refined = refineProjection({
     budgetPerMs: r.budgetPerMs,
-    burnPerMs: r.burnPerMs,
+    usedPct: r.used,
+    remainingMs: r.remainingMs,
     recentBurnPerMs: recent,
-    windowMs: win.windowMs,
   });
   // Use the refined verdict/projection when available, otherwise fall back.
   const effectiveVerdict = refined.verdict ?? r.verdict;
@@ -980,6 +980,16 @@ form.addEventListener("submit", (event) => {
   // Carry forward any existing history, then append the new reading.
   const prev = load();
 
+  // Hours-used counts the current week. Once the weekly window rolls over that
+  // count belongs to a week that is gone, and keeping it would silently pair an
+  // old hour count with fresh percentages.
+  let hoursUsed = data.get("hoursUsed");
+  const prevWeeklyReset = prev && prev.weekly ? new Date(prev.weekly.reset).getTime() : null;
+  if (prevWeeklyReset !== null && prevWeeklyReset !== weeklyReset) {
+    hoursUsed = "";
+    el("hours-used").value = "";
+  }
+
   function buildHistory(key, pctStr, resetAt, windowMs) {
     const windowStart = resetAt - windowMs;
     const pctNum = Number(pctStr);
@@ -1006,7 +1016,7 @@ form.addEventListener("submit", (event) => {
       reset: sessionReset,
       history: buildHistory("session", data.get("sessionPct"), sessionReset, SESSION_MS),
     },
-    hoursUsed: data.get("hoursUsed"), // optional; blank means percentages only
+    hoursUsed, // optional; blank means percentages only
     capturedAt: now,
   };
 
@@ -1074,8 +1084,11 @@ el("import").addEventListener("click", () => {
 
   el("session-pct").value = parsed.session.pct;
   const left = parsed.session.resetAt - now;
-  el("session-hours").value = Math.max(0, Math.floor(left / HOUR_MS));
-  el("session-minutes").value = Math.max(0, Math.round((left % HOUR_MS) / MINUTE_MS));
+  let hours = Math.floor(left / HOUR_MS);
+  let minutes = Math.round((left % HOUR_MS) / MINUTE_MS);
+  if (minutes === 60) { hours += 1; minutes = 0; } // 4h 59m 45s must not become 4h 60m
+  el("session-hours").value = hours;
+  el("session-minutes").value = minutes;
 
   form.requestSubmit();
 });

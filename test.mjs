@@ -393,11 +393,14 @@ check("recentRate handles unsorted history", () => {
 
 // --- refine projection -----------------------------------------------------
 check("refineProjection overrides projection with recent rate", () => {
+  // Nothing spent and the whole window still ahead: the recent rate covers all
+  // of it, so it projects the rate itself. Part-way through a window the two
+  // differ, which is what the recent-rate projection tests below pin down.
   const r = refineProjection({
     budgetPerMs: 100 / WEEK_MS,
-    burnPerMs: 50 / WEEK_MS,
+    usedPct: 0,
+    remainingMs: WEEK_MS,
     recentBurnPerMs: 80 / WEEK_MS,
-    windowMs: WEEK_MS,
   });
   assert.ok(Math.abs(r.projectedPct - 80) < 1e-9);
   assert.equal(r.recentBurnPerMs, 80 / WEEK_MS);
@@ -419,18 +422,18 @@ check("refineProjection derives verdict from recent rate vs budget", () => {
   // Recent rate much higher than budget → over pace
   const over = refineProjection({
     budgetPerMs: 50 / WEEK_MS,
-    burnPerMs: 30 / WEEK_MS,   // overall is fine
+    usedPct: 20,                    // overall pace is fine
+    remainingMs: WEEK_MS / 2,
     recentBurnPerMs: 150 / WEEK_MS, // but recently burning fast
-    windowMs: WEEK_MS,
   });
   assert.equal(over.verdict, "over");
 
   // Recent rate much lower than budget → under pace
   const under = refineProjection({
     budgetPerMs: 100 / WEEK_MS,
-    burnPerMs: 80 / WEEK_MS,
+    usedPct: 20,
+    remainingMs: WEEK_MS / 2,
     recentBurnPerMs: 30 / WEEK_MS,
-    windowMs: WEEK_MS,
   });
   assert.equal(under.verdict, "under");
 });
@@ -561,6 +564,67 @@ check("nonsense after the word resets is rejected, not guessed at", () => {
   assert.equal(parseResetPhrase("Jul 99, 8am", PASTE_NOW), null);
   assert.equal(parseResetPhrase("Feb 30, 8am", PASTE_NOW), null);
   assert.equal(parseResetPhrase("Jul 26, 25:00", PASTE_NOW), null);
+});
+
+
+// --- recent-rate projection ------------------------------------------------
+// A recent rate describes what is happening NOW, so it may only be applied to
+// the time still ahead. Multiplying it by the whole window re-spends the past
+// at the present rate and can even project less than is already gone.
+const PROJ_NOW = new Date(2026, 6, 26, 20, 5, 0).getTime();
+const PROJ_RESET = new Date(2026, 6, 29, 8, 0, 0).getTime();
+const projBase = analyze({ usedPct: 61, resetAt: PROJ_RESET, windowMs: WEEK_MS, now: PROJ_NOW });
+
+const projectAt = (perHour) => refineProjection({
+  budgetPerMs: projBase.budgetPerMs,
+  usedPct: projBase.used,
+  remainingMs: projBase.remainingMs,
+  recentBurnPerMs: perHour / HOUR_MS,
+});
+
+check("a recent rate is applied only to the time left, not the whole window", () => {
+  const hoursLeft = projBase.remainingMs / HOUR_MS;
+  for (const perHour of [0.2, 1, 3, 8]) {
+    const got = projectAt(perHour).projectedPct;
+    assert.ok(Math.abs(got - (61 + perHour * hoursLeft)) < 1e-9,
+      `at ${perHour}%/h expected ${61 + perHour * hoursLeft}, got ${got}`);
+  }
+});
+
+check("a projection can never come out below what is already spent", () => {
+  for (const perHour of [0, 0.01, 0.2, 1, 50]) {
+    assert.ok(projectAt(perHour).projectedPct >= 61,
+      `${perHour}%/h projected below the 61% already spent`);
+  }
+});
+
+check("a dead-quiet recent stretch projects the current figure, not zero", () => {
+  assert.equal(projectAt(0).projectedPct, 61);
+});
+
+check("no recent rate means no refinement, so the caller falls back", () => {
+  const none = refineProjection({
+    budgetPerMs: projBase.budgetPerMs, usedPct: 61,
+    remainingMs: projBase.remainingMs, recentBurnPerMs: null,
+  });
+  assert.equal(none.projectedPct, null);
+  assert.equal(none.verdict, null);
+  assert.equal(none.recentBurnPerMs, null);
+});
+
+check("the refined verdict compares the budget against the recent rate", () => {
+  const budgetPerHour = perHour(projBase.budgetPerMs);
+  assert.equal(projectAt(budgetPerHour * 3).verdict, "over");
+  assert.equal(projectAt(budgetPerHour / 3).verdict, "under");
+  assert.equal(projectAt(budgetPerHour).verdict, "on");
+});
+
+check("nonsense inputs refine to nothing rather than NaN", () => {
+  const bad = refineProjection({
+    budgetPerMs: projBase.budgetPerMs, usedPct: "abc",
+    remainingMs: projBase.remainingMs, recentBurnPerMs: 1 / HOUR_MS,
+  });
+  assert.equal(bad.projectedPct, null);
 });
 
 console.log(`ok — ${passed} checks passed`);

@@ -379,17 +379,29 @@ export function recentRate(history, windowStart) {
  * sharper projection than the overall average because it captures what the user
  * is doing *now*, not what they did two days ago.
  *
+ * The recent rate describes the present, so it may only be applied to the time
+ * still ahead: what is already spent is banked and cannot be re-forecast.
+ * Multiplying the recent rate by the whole window instead would re-spend the
+ * past at the current rate, which inflates a busy stretch wildly and — after a
+ * quiet one — can project a total below what has already gone.
+ *
  * Returns { recentBurnPerMs, projectedPct, verdict }. Any field may be null if
  * there is not enough data, in which case the caller should fall back to the
  * original values from analyze().
  */
-export function refineProjection({ budgetPerMs, burnPerMs, recentBurnPerMs, windowMs }) {
-  if (recentBurnPerMs === null || recentBurnPerMs === undefined) {
-    return { recentBurnPerMs: null, projectedPct: null, verdict: null };
-  }
-  const projectedPct = recentBurnPerMs * windowMs;
-  const verdict = paceVerdict(budgetPerMs, recentBurnPerMs);
-  return { recentBurnPerMs, projectedPct, verdict };
+export function refineProjection({ budgetPerMs, usedPct, remainingMs, recentBurnPerMs }) {
+  const nothing = { recentBurnPerMs: null, projectedPct: null, verdict: null };
+  if (recentBurnPerMs === null || recentBurnPerMs === undefined) return nothing;
+
+  const used = Number(usedPct);
+  if (!Number.isFinite(used) || !Number.isFinite(remainingMs) || remainingMs < 0) return nothing;
+  if (!Number.isFinite(recentBurnPerMs) || recentBurnPerMs < 0) return nothing;
+
+  return {
+    recentBurnPerMs,
+    projectedPct: used + recentBurnPerMs * remainingMs,
+    verdict: paceVerdict(budgetPerMs, recentBurnPerMs),
+  };
 }
 
 /** Local midnight at the end of the calendar day containing `ms`. */
