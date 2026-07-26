@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {
   analyze, planDays, hourlyCost, hoursFor, resetInDuration, nextWeekdayAt,
-  recentRate, refineProjection,
+  recentRate, refineProjection, parseUsageText, parseResetPhrase,
   perDay, perHour, formatDuration, formatAge,
   WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS, MINUTE_MS,
 } from "./pacer.js";
@@ -459,6 +459,108 @@ check("planDays falls back to proportional-by-ms when all weights are zero", () 
   assert.ok(plan.length > 0); // should not return empty
   const total = plan.reduce((sum, d) => sum + d.pct, 0);
   assert.ok(Math.abs(total - 50) < 1e-9);
+});
+
+
+// --- importing pasted /usage output ---------------------------------------
+// Jul 26 2026, 14:16 local — matching the sample readings below.
+const PASTE_NOW = new Date(2026, 6, 26, 14, 16, 0).getTime();
+
+const CLI_OUTPUT = `You are currently using your subscription to power your Claude Code usage
+
+Current session: 71% used · resets Jul 26, 6:40pm (Asia/Dhaka)
+Current week (all models): 54% used · resets Jul 29, 8am (Asia/Dhaka)
+
+breakdown · opus: 100% · haiku: 0% · cache hit: 98%`;
+
+const APP_SCREEN = `Usage
+Current session          71% used
+Resets in 4 hr 23 min
+Weekly limits
+All models               54% used
+Resets Wed 08:00
+Credits
+Balance                  92.55 credits`;
+
+check("the CLI output parses into both meters", () => {
+  const r = parseUsageText(CLI_OUTPUT, PASTE_NOW);
+  assert.equal(r.error, undefined);
+  assert.equal(r.session.pct, 71);
+  assert.equal(r.weekly.pct, 54);
+  // 6:40pm the same day is 4h24m out; 8am on the 29th is a bit under 3 days.
+  assert.equal(r.session.resetAt - PASTE_NOW, (4 * 60 + 24) * MINUTE_MS);
+  assert.equal(new Date(r.weekly.resetAt).getDate(), 29);
+  assert.equal(new Date(r.weekly.resetAt).getHours(), 8);
+});
+
+check("the per-model breakdown line is not mistaken for usage", () => {
+  const r = parseUsageText(CLI_OUTPUT, PASTE_NOW);
+  assert.equal(r.session.pct, 71);  // not opus 100%
+  assert.equal(r.weekly.pct, 54);   // not haiku 0% or cache 98%
+});
+
+check("the app's Usage screen parses too, resets on their own lines", () => {
+  const r = parseUsageText(APP_SCREEN, PASTE_NOW);
+  assert.equal(r.error, undefined);
+  assert.equal(r.session.pct, 71);
+  assert.equal(r.weekly.pct, 54);
+  assert.equal(r.session.resetAt - PASTE_NOW, (4 * 60 + 23) * MINUTE_MS);
+  assert.equal(new Date(r.weekly.resetAt).getDay(), 3); // Wednesday
+  assert.equal(new Date(r.weekly.resetAt).getHours(), 8);
+});
+
+check("the credits balance is not read as a percentage", () => {
+  const r = parseUsageText(APP_SCREEN, PASTE_NOW);
+  assert.notEqual(r.weekly.pct, 92.55);
+});
+
+check("parsed readings feed straight into analyze", () => {
+  const r = parseUsageText(CLI_OUTPUT, PASTE_NOW);
+  const wk = analyze({ usedPct: r.weekly.pct, resetAt: r.weekly.resetAt, windowMs: WEEK_MS, now: PASTE_NOW });
+  const se = analyze({ usedPct: r.session.pct, resetAt: r.session.resetAt, windowMs: SESSION_MS, now: PASTE_NOW });
+  assert.equal(wk.error, undefined);
+  assert.equal(se.error, undefined);
+  assert.equal(wk.state, "ok");
+  assert.equal(se.state, "ok");
+});
+
+check("incomplete paste says what is missing rather than guessing", () => {
+  assert.match(parseUsageText("", PASTE_NOW).error, /Paste what/);
+  assert.match(parseUsageText("   \n  ", PASTE_NOW).error, /Paste what/);
+  assert.match(parseUsageText("Current session: 71% used", PASTE_NOW).error, /reset time/);
+  assert.match(parseUsageText("Current session: 71% used · resets Jul 26, 6:40pm", PASTE_NOW).error, /weekly limit percentage/);
+  assert.match(parseUsageText("hello world", PASTE_NOW).error, /Could not find/);
+});
+
+check("all three reset phrasings are understood", () => {
+  assert.equal(parseResetPhrase("in 4 hr 23 min", PASTE_NOW) - PASTE_NOW, (4 * 60 + 23) * MINUTE_MS);
+  assert.equal(parseResetPhrase("in 45 min", PASTE_NOW) - PASTE_NOW, 45 * MINUTE_MS);
+  assert.equal(parseResetPhrase("in 2h", PASTE_NOW) - PASTE_NOW, 2 * HOUR_MS);
+  assert.equal(new Date(parseResetPhrase("Wed 08:00", PASTE_NOW)).getDay(), 3);
+  assert.equal(new Date(parseResetPhrase("Jul 29, 8am", PASTE_NOW)).getDate(), 29);
+  assert.equal(new Date(parseResetPhrase("Jul 26, 6:40pm", PASTE_NOW)).getHours(), 18);
+});
+
+check("a timezone label does not confuse the reset phrase", () => {
+  const withTz = parseResetPhrase("Jul 29, 8am (Asia/Dhaka)", PASTE_NOW);
+  const without = parseResetPhrase("Jul 29, 8am", PASTE_NOW);
+  assert.equal(withTz, without);
+});
+
+check("a date with no year picks the nearest one across a year boundary", () => {
+  const newYearsEve = new Date(2026, 11, 31, 20, 0, 0).getTime();
+  const at = parseResetPhrase("Jan 2, 9am", newYearsEve);
+  assert.equal(new Date(at).getFullYear(), 2027);
+  assert.ok(at > newYearsEve && at - newYearsEve < WEEK_MS);
+});
+
+check("nonsense after the word resets is rejected, not guessed at", () => {
+  assert.equal(parseResetPhrase("", PASTE_NOW), null);
+  assert.equal(parseResetPhrase("soon", PASTE_NOW), null);
+  assert.equal(parseResetPhrase("Smurfday 08:00", PASTE_NOW), null);
+  assert.equal(parseResetPhrase("Jul 99, 8am", PASTE_NOW), null);
+  assert.equal(parseResetPhrase("Feb 30, 8am", PASTE_NOW), null);
+  assert.equal(parseResetPhrase("Jul 26, 25:00", PASTE_NOW), null);
 });
 
 console.log(`ok — ${passed} checks passed`);

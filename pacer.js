@@ -167,6 +167,155 @@ export function nextWeekdayAt({ weekday, time, now = Date.now() }) {
   return target.getTime();
 }
 
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun",
+                "jul", "aug", "sep", "oct", "nov", "dec"];
+const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const pad2 = (n) => String(n).padStart(2, "0");
+
+/** "6:40pm", "8am", "08:00", "18:14" → { hh, mm }, or null. */
+function parseClock(text) {
+  const m = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i.exec(String(text).trim());
+  if (!m) return null;
+  let hh = Number(m[1]);
+  const mm = m[2] ? Number(m[2]) : 0;
+  const meridiem = m[3] ? m[3].toLowerCase() : null;
+  if (mm > 59) return null;
+  if (meridiem) {
+    if (hh < 1 || hh > 12) return null;
+    if (meridiem === "pm" && hh !== 12) hh += 12;
+    if (meridiem === "am" && hh === 12) hh = 0;
+  } else if (hh > 23) {
+    return null;
+  }
+  return { hh, mm };
+}
+
+/**
+ * "Jul 26" carries no year. Windows are at most a week long, so pick whichever
+ * year puts the date nearest to now — which also gets December/January right.
+ */
+function nearestYearFor(monthIdx, day, clock, now) {
+  const thisYear = new Date(now).getFullYear();
+  const build = (year) => {
+    const d = new Date(year, monthIdx, day, clock.hh, clock.mm, 0, 0);
+    // Reject rollovers like "Feb 30" landing in March.
+    return d.getMonth() === monthIdx && d.getDate() === day ? d.getTime() : null;
+  };
+  const candidates = [build(thisYear - 1), build(thisYear), build(thisYear + 1)]
+    .filter((v) => v !== null);
+  if (candidates.length === 0) return null;
+  return candidates.reduce((best, c) => (Math.abs(c - now) < Math.abs(best - now) ? c : best));
+}
+
+/**
+ * Read whatever follows the word "resets" into an instant.
+ *
+ * Claude states it three different ways depending on where you look:
+ *   "in 4 hr 23 min"   the app, for the session
+ *   "Wed 08:00"        the app, for the week
+ *   "Jul 26, 6:40pm"   the CLI, for either
+ *
+ * A trailing timezone label like "(Asia/Dhaka)" is dropped; times are read in
+ * the browser's own zone, which is the same machine in practice.
+ */
+export function parseResetPhrase(phrase, now = Date.now()) {
+  const s = String(phrase ?? "")
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.,;]+$/, "");
+  if (!s) return null;
+
+  // "in 4 hr 23 min" / "in 45 min" / "in 2h"
+  const dur = /^in (?:(\d+) ?(?:h|hr|hrs|hour|hours))? ?(?:(\d+) ?(?:m|min|mins|minute|minutes))?$/
+    .exec(s);
+  if (dur && (dur[1] || dur[2])) {
+    return resetInDuration({ hours: dur[1] ?? 0, minutes: dur[2] ?? 0, now });
+  }
+
+  // "wed 08:00" / "wednesday 8am"
+  const wd = /^(?:on )?([a-z]{3,9})\.? (\d{1,2}(?::\d{2})? ?(?:am|pm)?)$/.exec(s);
+  if (wd) {
+    const dayIdx = WEEKDAYS.indexOf(wd[1].slice(0, 3));
+    const clock = parseClock(wd[2]);
+    if (dayIdx >= 0 && clock) {
+      return nextWeekdayAt({
+        weekday: dayIdx,
+        time: `${pad2(clock.hh)}:${pad2(clock.mm)}`,
+        now,
+      });
+    }
+  }
+
+  // "jul 26, 6:40pm" / "26 jul at 8am"
+  const md = /^(?:on )?([a-z]{3,9})\.? (\d{1,2})(?:st|nd|rd|th)? ?,? ?(?:at )?(\d{1,2}(?::\d{2})? ?(?:am|pm)?)$/
+    .exec(s);
+  if (md) {
+    const monthIdx = MONTHS.indexOf(md[1].slice(0, 3));
+    const day = Number(md[2]);
+    const clock = parseClock(md[3]);
+    if (monthIdx >= 0 && day >= 1 && day <= 31 && clock) {
+      return nearestYearFor(monthIdx, day, clock, now);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Pull both meters out of pasted `/usage` output or the app's Usage screen.
+ *
+ * Tolerant by design: it scans line by line for a meter name, a percentage and
+ * a "resets ..." phrase, and lets the reset sit on its own line beneath the
+ * name the way the app lays it out. The `breakdown` line is skipped explicitly
+ * because its per-model percentages are not window usage.
+ *
+ * Returns { weekly: {pct, resetAt}, session: {pct, resetAt} } or { error }.
+ */
+export function parseUsageText(text, now = Date.now()) {
+  if (!String(text ?? "").trim()) return { error: "Paste what /usage printed first." };
+
+  const found = { session: {}, weekly: {} };
+  let current = null;
+
+  for (const line of String(text).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const low = trimmed.toLowerCase();
+
+    // Per-model breakdown percentages are not window usage.
+    if (/^breakdown\b/.test(low)) { current = null; continue; }
+
+    const meter =
+      /current session|^session\b/.test(low) ? "session" :
+      /current week|weekly|all models/.test(low) ? "weekly" :
+      null;
+    if (meter) current = meter;
+    if (!current) continue;
+
+    const pct = /(\d+(?:\.\d+)?)\s*%/.exec(trimmed);
+    if (pct && found[current].pct === undefined) found[current].pct = Number(pct[1]);
+
+    const resets = /resets?\b:?\s+(.+)$/i.exec(trimmed);
+    if (resets && found[current].resetAt === undefined) {
+      const at = parseResetPhrase(resets[1], now);
+      if (at !== null) found[current].resetAt = at;
+    }
+  }
+
+  const missing = [];
+  for (const [key, label] of [["session", "5-hour session"], ["weekly", "weekly limit"]]) {
+    if (found[key].pct === undefined) missing.push(`${label} percentage`);
+    else if (found[key].resetAt === undefined) missing.push(`${label} reset time`);
+  }
+  if (missing.length) {
+    return { error: `Could not find the ${missing.join(" or the ")} in that. Paste the whole of what /usage printed.` };
+  }
+
+  return { session: found.session, weekly: found.weekly };
+}
+
 /**
  * What one hour of actual use costs, as a share of the window.
  *

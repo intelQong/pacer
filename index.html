@@ -144,6 +144,40 @@
     padding: 0.1em 0.35em;
     border-radius: 3px;
   }
+  /* ---- paste importer -------------------------------------------------- */
+  .importer textarea {
+    width: 100%;
+    margin-top: 0.125rem;
+    font: 400 0.8125rem/1.5 var(--mono);
+    color: var(--ink);
+    background: #fff;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 0.625rem 0.6875rem;
+    resize: vertical;
+  }
+  .importer textarea:focus { border-color: var(--clay); outline: none; }
+  .importer textarea::placeholder { color: var(--faint); }
+  .importer .btn { margin-top: 0.625rem; }
+
+  .or-rule {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 1.375rem 0;
+    font: var(--eyebrow);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .or-rule::before,
+  .or-rule::after {
+    content: "";
+    flex: 1 1 0;
+    height: 1px;
+    background: var(--rule);
+  }
+
   .field-group + .field-group { margin-top: 1.25rem; }
   .field-legend { margin-bottom: 0.6875rem; }
   .field-row { display: flex; gap: 0.75rem; }
@@ -275,6 +309,12 @@
   /* ---- the day-by-day split -------------------------------------------- */
   .plan { margin-top: 1.75rem; }
   .plan-title { margin-bottom: 0.875rem; }
+  .plan-note {
+    margin: 0.75rem 0 0;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--faint);
+  }
   .day {
     display: grid;
     grid-template-columns: 1fr 5.5rem 1fr;
@@ -366,10 +406,21 @@
 
   <section class="readings" id="readings">
     <p class="readings-intro">
-      Copy the figures straight off <code>/usage</code> in Claude Code, or the Usage screen in
-      the Claude app — the reset boxes take them in the same shape those show them.
-      Nothing leaves this browser.
+      Run <code>/usage</code> in Claude Code and paste the whole thing below — it reads the
+      figures out for you. Or fill the boxes by hand from the Claude app's Usage screen.
+      Nothing leaves this browser either way.
     </p>
+
+    <div class="importer">
+      <label for="paste" class="field-legend eyebrow">Paste from /usage</label>
+      <textarea id="paste" rows="3" spellcheck="false"
+        placeholder="Current session: 71% used · resets Jul 26, 6:40pm&#10;Current week (all models): 54% used · resets Jul 29, 8am"></textarea>
+      <p class="form-error" id="paste-error" hidden></p>
+      <button type="button" class="btn" id="import">Read it</button>
+    </div>
+
+    <div class="or-rule"><span>or type it in</span></div>
+
     <form id="form" novalidate>
       <p class="form-error" id="form-error" hidden></p>
 
@@ -455,13 +506,13 @@
 <script type="module">
 import {
   analyze, planDays, hourlyCost, hoursFor, resetInDuration, nextWeekdayAt,
-  recentRate, refineProjection,
+  recentRate, refineProjection, parseUsageText,
   perDay, perHour, formatDuration, formatAge,
   WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS, MINUTE_MS,
 // Versioned so a cached pacer.js can never pair with a newer index.html. A
 // stale module means a missing export, which kills the whole page rather than
 // degrading it. Bump this whenever pacer.js changes.
-} from "./pacer.js?v=4";
+} from "./pacer.js?v=5";
 
 const STORE_KEY = "claude-pace/v1";
 const STALE_AFTER = 3 * HOUR_MS;
@@ -558,14 +609,25 @@ function planHtml(reading, resetAt, now, costPerHour) {
           <small>${escape(shortDate(d.startsAt))} · ${escape(detail)}</small>
         </div>
         <div class="day-pct">${num(d.pct)}%
-          ${useHours === null ? "" : `<small>${num(useHours)} h of use</small>`}
+          <small>${useHours === null ? "&mdash;" : `≈ ${num(useHours)} hours`}</small>
         </div>
         <div class="day-bar"><i style="width:${(d.pct / peak) * 100}%"></i></div>
       </div>`;
   }).join("");
 
+  const hoursLeft = hoursFor(reading.leftPct, costPerHour);
+  const heading = hoursLeft === null
+    ? "Your share, day by day"
+    : `Your share, day by day · about ${num(hoursLeft)} hours left this week`;
+
+  // Say why the hours column is blank rather than leaving dashes unexplained.
+  const note = costPerHour === null
+    ? `<p class="plan-note">Fill in the hours you have used this week, above, and each day's
+       share also shows as hours you can spend.</p>`
+    : "";
+
   return `<div class="plan">
-      <div class="plan-title eyebrow">Your share, day by day</div>${rows}
+      <div class="plan-title eyebrow">${escape(heading)}</div>${rows}${note}
     </div>`;
 }
 
@@ -820,6 +882,46 @@ form.addEventListener("submit", (event) => {
   clearBtn.hidden = false;
   showForm(false);
   render();
+});
+
+// ---- paste importer -------------------------------------------------------
+const pasteBox = el("paste");
+const pasteError = el("paste-error");
+
+el("import").addEventListener("click", () => {
+  const now = Date.now();
+  const parsed = parseUsageText(pasteBox.value, now);
+
+  if (parsed.error) {
+    pasteError.textContent = parsed.error;
+    pasteError.hidden = false;
+    return;
+  }
+  // A reading old enough that its session already reset would otherwise fail
+  // downstream as "enter how long until your session resets", blaming boxes the
+  // reader never touched. Name the real problem here.
+  if (parsed.session.resetAt <= now) {
+    pasteError.textContent =
+      "That session window has already reset, so the reading is out of date. Run /usage again.";
+    pasteError.hidden = false;
+    return;
+  }
+  pasteError.hidden = true;
+
+  // Fill the same boxes a person would, then submit through the same path, so
+  // pasting cannot take a shortcut around the validation typing goes through.
+  const weeklyReset = new Date(parsed.weekly.resetAt);
+  el("weekly-pct").value = parsed.weekly.pct;
+  el("weekly-weekday").value = weeklyReset.getDay();
+  el("weekly-time").value =
+    `${String(weeklyReset.getHours()).padStart(2, "0")}:${String(weeklyReset.getMinutes()).padStart(2, "0")}`;
+
+  el("session-pct").value = parsed.session.pct;
+  const left = parsed.session.resetAt - now;
+  el("session-hours").value = Math.max(0, Math.floor(left / HOUR_MS));
+  el("session-minutes").value = Math.max(0, Math.round((left % HOUR_MS) / MINUTE_MS));
+
+  form.requestSubmit();
 });
 
 toggleBtn.addEventListener("click", () => {
