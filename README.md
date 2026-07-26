@@ -41,6 +41,22 @@ From there:
 | **Burned so far** | `used / elapsed` |
 | **Verdict** | budget rate vs. burn rate, with 5% tolerance either side of level |
 
+### Getting an answer in hours
+
+Percentages do not convert to hours on their own. Elapsed wall-clock time cannot stand in for
+hours of use, because most of a week is time you were not using Claude at all.
+
+So there is one optional field: **roughly how many hours you have actually used this week**.
+From that it works out what an hour costs you, and restates the budget in hours:
+
+```
+48% spent over about 12 hours   →  4% of the week per hour
+18.9% a day                     →  about 4.7 hours a day
+```
+
+Leave it blank and everything stays in percentages. A rough count is fine, and the estimate
+sharpens as the week goes on.
+
 ### Why the day-by-day split is not just "divide by days left"
 
 A flat per-day figure is wrong at both ends of the week. Today is already part spent, and
@@ -79,8 +95,8 @@ node test.mjs
 | File | Purpose |
 |---|---|
 | `index.html` | The page. Inline CSS and JS, no build step, no dependencies. |
-| `pacer.js` | The maths: `analyze()`, `planDays()`, formatting helpers. |
-| `test.mjs` | 28 assertions over the maths and its edge cases. |
+| `pacer.js` | The maths: `analyze()`, `planDays()`, `hourlyCost()`, formatting helpers. |
+| `test.mjs` | 32 assertions over the maths and its edge cases. |
 
 ## Hosting
 

@@ -112,6 +112,28 @@ function paceVerdict(budgetPerMs, burnPerMs) {
 export const perDay = (ratePerMs) => (ratePerMs === null ? null : ratePerMs * DAY_MS);
 export const perHour = (ratePerMs) => (ratePerMs === null ? null : ratePerMs * HOUR_MS);
 
+/**
+ * What one hour of actual use costs, as a share of the window.
+ *
+ * Elapsed wall-clock time cannot answer this: most of a week is time you were
+ * not using Claude at all. So this needs your own count of hours spent, and it
+ * sharpens as the week goes on. Returns null when there is nothing to divide.
+ */
+export function hourlyCost({ usedPct, hoursUsed }) {
+  const used = Number(usedPct);
+  const hours = Number(hoursUsed);
+  if (!Number.isFinite(used) || used <= 0) return null;
+  if (!Number.isFinite(hours) || hours <= 0) return null;
+  return used / hours;
+}
+
+/** Turn a share of the window into hours of use, given a cost per hour. */
+export function hoursFor(pct, costPerHour) {
+  if (!Number.isFinite(pct) || pct < 0) return null;
+  if (!Number.isFinite(costPerHour) || costPerHour <= 0) return null;
+  return pct / costPerHour;
+}
+
 /** Local midnight at the end of the calendar day containing `ms`. */
 function nextMidnight(ms) {
   const d = new Date(ms);

@@ -167,6 +167,14 @@
     padding: 0.5rem 0.6875rem;
   }
   .field input:focus { border-color: var(--clay); outline: none; }
+  .field-wide { margin-top: 0.875rem; }
+  .field label em { font-style: normal; color: var(--faint); }
+  .field-help {
+    margin: 0.4375rem 0 0;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--faint);
+  }
   .form-actions {
     display: flex;
     gap: 0.625rem;
@@ -254,7 +262,7 @@
   .plan-title { margin-bottom: 0.875rem; }
   .day {
     display: grid;
-    grid-template-columns: 1fr 3.25rem 1fr;
+    grid-template-columns: 1fr 5.5rem 1fr;
     align-items: center;
     gap: 0.875rem;
     padding: 0.5rem 0;
@@ -272,6 +280,12 @@
     font: 500 0.9375rem var(--mono);
     font-variant-numeric: tabular-nums;
     text-align: right;
+  }
+  .day-pct small {
+    display: block;
+    margin-top: 0.1875rem;
+    font: 400 0.75rem var(--sans);
+    color: var(--faint);
   }
   .day-bar { height: 0.5rem; background: var(--trench); border-radius: 999px; }
   .day-bar i { display: block; height: 100%; background: var(--clay); border-radius: 999px; }
@@ -356,6 +370,15 @@
             <input id="weekly-reset" name="weeklyReset" type="datetime-local" required>
           </div>
         </div>
+        <div class="field field-wide">
+          <label for="hours-used">Hours you have actually used this week <em>— optional</em></label>
+          <input id="hours-used" name="hoursUsed" type="number" min="0" max="168" step="0.5"
+                 inputmode="decimal" placeholder="e.g. 12">
+          <p class="field-help">
+            A rough count is enough. Without it the budget stays in percentages; with it,
+            every figure also shows in hours.
+          </p>
+        </div>
       </div>
 
       <div class="field-group">
@@ -397,7 +420,7 @@
 
 <script type="module">
 import {
-  analyze, planDays, perDay, perHour, formatDuration, formatAge,
+  analyze, planDays, hourlyCost, hoursFor, perDay, perHour, formatDuration, formatAge,
   WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS,
 } from "./pacer.js";
 
@@ -467,7 +490,7 @@ function bandHtml(fillPct, markerPct, color, ticks) {
     </div>`;
 }
 
-function planHtml(reading, resetAt, now) {
+function planHtml(reading, resetAt, now, costPerHour) {
   const days = planDays({ leftPct: reading.leftPct, resetAt, now });
   if (days.length === 0) return "";
 
@@ -477,12 +500,15 @@ function planHtml(reading, resetAt, now) {
     const detail = last
       ? `${d.hours.toFixed(0)}h, resets ${clock(d.endsAt)}`
       : `${d.hours.toFixed(0)} hours`;
+    const useHours = hoursFor(d.pct, costPerHour);
     return `
       <div class="day${i === 0 ? " day-today" : ""}">
         <div class="day-name">${escape(dayName(d.startsAt, now))}
           <small>${escape(shortDate(d.startsAt))} · ${escape(detail)}</small>
         </div>
-        <div class="day-pct">${num(d.pct)}%</div>
+        <div class="day-pct">${num(d.pct)}%
+          ${useHours === null ? "" : `<small>${num(useHours)} h of use</small>`}
+        </div>
         <div class="day-bar"><i style="width:${(d.pct / peak) * 100}%"></i></div>
       </div>`;
   }).join("");
@@ -492,7 +518,7 @@ function planHtml(reading, resetAt, now) {
     </div>`;
 }
 
-function renderCard(win, reading, now) {
+function renderCard(win, reading, now, costPerHour) {
   const mount = el(win.mount);
   const head = (right) => `
     <div class="card-head">
@@ -554,12 +580,12 @@ function renderCard(win, reading, now) {
        <span>steady pace would be <b>${Math.round(steady)}%</b> by now</span>
      </div>
      <p class="status">${status}</p>` +
-    (win.plan ? planHtml(r, reading.reset, now) : "");
+    (win.plan ? planHtml(r, reading.reset, now, costPerHour) : "");
 
   return r;
 }
 
-function renderThesis(weekly, now) {
+function renderThesis(weekly, costPerHour) {
   if (!weekly || weekly.error) { thesis.hidden = true; thesisSub.hidden = true; return; }
 
   if (weekly.state === "expired") {
@@ -571,12 +597,22 @@ function renderThesis(weekly, now) {
       `It comes back in <strong>${formatDuration(weekly.remainingMs)}</strong>.`;
   } else {
     const budget = perDay(weekly.budgetPerMs);
+    const dailyHours = hoursFor(budget, costPerHour);
     const verb = weekly.verdict === "over" ? "Ease down to" : "You can spend";
-    thesis.innerHTML =
-      `${verb} <strong>${num(budget)}%</strong> of your weekly limit a day for the rest of the week.`;
-    thesisSub.textContent =
-      `That is ${num(weekly.leftPct)}% of quota spread across the ` +
-      `${formatDuration(weekly.remainingMs)} left before it resets.`;
+
+    thesis.innerHTML = dailyHours === null
+      ? `${verb} <strong>${num(budget)}%</strong> of your weekly limit a day for the rest
+         of the week.`
+      : `${verb} about <strong>${num(dailyHours)} hours</strong> a day for the rest of the
+         week.`;
+
+    const spread =
+      `${num(weekly.leftPct)}% of quota across the ` +
+      `${formatDuration(weekly.remainingMs)} left before it resets`;
+    thesisSub.textContent = dailyHours === null
+      ? `That is ${spread}.`
+      : `That is ${spread} — ${num(budget)}% a day, at the ` +
+        `${num(costPerHour)}% an hour you have been averaging.`;
   }
   thesis.hidden = false;
   thesisSub.hidden = false;
@@ -587,12 +623,19 @@ function render() {
   if (!entry) return;
 
   const now = Date.now();
+  // Weekly percent per hour of actual use. Null unless the optional hours
+  // field is filled in, in which case everything stays in percentages.
+  const costPerHour = hourlyCost({
+    usedPct: entry.weekly.pct,
+    hoursUsed: entry.hoursUsed,
+  });
+
   let weekly = null;
   for (const win of WINDOWS) {
-    const r = renderCard(win, entry[win.key], now);
+    const r = renderCard(win, entry[win.key], now, win.plan ? costPerHour : null);
     if (win.key === "weekly") weekly = r;
   }
-  renderThesis(weekly, now);
+  renderThesis(weekly, costPerHour);
 
   const age = now - entry.capturedAt;
   const stale = el("stale");
@@ -618,6 +661,7 @@ form.addEventListener("submit", (event) => {
   const entry = {
     weekly:  { pct: data.get("weeklyPct"),  reset: data.get("weeklyReset") },
     session: { pct: data.get("sessionPct"), reset: data.get("sessionReset") },
+    hoursUsed: data.get("hoursUsed"), // optional; blank means percentages only
     capturedAt: Date.now(),
   };
 
@@ -665,6 +709,7 @@ if (saved) {
   el("weekly-reset").value = saved.weekly.reset;
   el("session-pct").value = saved.session.pct;
   el("session-reset").value = saved.session.reset;
+  el("hours-used").value = saved.hoursUsed ?? "";
   results.hidden = false;
   toggleBtn.hidden = false;
   clearBtn.hidden = false;

@@ -1,7 +1,7 @@
 // Run: node test.mjs
 import assert from "node:assert/strict";
 import {
-  analyze, planDays, perDay, perHour, formatDuration, formatAge,
+  analyze, planDays, hourlyCost, hoursFor, perDay, perHour, formatDuration, formatAge,
   WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS,
 } from "./pacer.js";
 
@@ -217,6 +217,33 @@ check("the plan is capped so a bad reset date cannot spin forever", () => {
     maxDays: 14,
   });
   assert.equal(plan.length, 14);
+});
+
+// --- percentages into hours -----------------------------------------------
+check("cost per hour comes from hours actually spent, not wall clock", () => {
+  assert.equal(hourlyCost({ usedPct: 48, hoursUsed: 12 }), 4);
+  assert.equal(hoursFor(18.8, 4), 4.7);
+});
+
+check("a whole week's budget converts to hours end to end", () => {
+  const r = weekly(48, WEEK_MS / 2);
+  const cost = hourlyCost({ usedPct: r.used, hoursUsed: 12 }); // 4% per hour
+  assert.equal(hoursFor(r.leftPct, cost), 13); // 52% left / 4% per hour
+});
+
+check("no hours estimate without something to divide", () => {
+  assert.equal(hourlyCost({ usedPct: 0, hoursUsed: 12 }), null);   // nothing spent yet
+  assert.equal(hourlyCost({ usedPct: 48, hoursUsed: 0 }), null);   // would divide by zero
+  assert.equal(hourlyCost({ usedPct: 48, hoursUsed: "" }), null);  // field left blank
+  assert.equal(hourlyCost({ usedPct: 48, hoursUsed: -3 }), null);
+  assert.equal(hourlyCost({ usedPct: 48, hoursUsed: "abc" }), null);
+});
+
+check("hours conversion refuses a missing or nonsense rate", () => {
+  assert.equal(hoursFor(20, null), null);
+  assert.equal(hoursFor(20, 0), null);
+  assert.equal(hoursFor(null, 4), null);
+  assert.equal(hoursFor(0, 4), 0);
 });
 
 check("analyze and planDays agree on what is left", () => {
