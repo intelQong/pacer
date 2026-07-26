@@ -103,6 +103,10 @@ node test.mjs
 Static files. Any host will do; this one is built for GitHub Pages — push to `main` and
 serve from the repository root. There is nothing to configure and nothing to keep secret.
 
+**One rule when changing `pacer.js`:** bump the `?v=` on its import in `index.html`. The page
+loads it as an ES module, so a cached copy missing a newly added export throws on import and
+the page renders nothing at all. The version query forces a fresh fetch.
+
 ## Caveats
 
 - Percentages are what Claude Code reports. This tool never fetches them for you.

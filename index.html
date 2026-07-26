@@ -422,7 +422,10 @@
 import {
   analyze, planDays, hourlyCost, hoursFor, perDay, perHour, formatDuration, formatAge,
   WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS,
-} from "./pacer.js";
+// Versioned so a cached pacer.js can never pair with a newer index.html. A
+// stale module means a missing export, which kills the whole page rather than
+// degrading it. Bump this whenever pacer.js changes.
+} from "./pacer.js?v=2";
 
 const STORE_KEY = "claude-pace/v1";
 const STALE_AFTER = 3 * HOUR_MS;
