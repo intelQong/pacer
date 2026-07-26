@@ -16,6 +16,11 @@ type in. Your readings are kept in your browser's local storage and nowhere else
 
 ## Use it
 
+**Quickest:** run `/usage` in Claude Code and paste the whole output into the box at the top.
+It reads out both percentages and both reset times for you.
+
+Or fill the boxes by hand:
+
 1. Run `/usage` in Claude Code, or open **Usage** in the Claude app.
 2. Copy the two figures across. The reset boxes take them in the same shape those screens
    show them, so there is nothing to convert:
@@ -88,6 +93,13 @@ Wednesday  Jul 29 · 8h, resets 8:14 AM    6.5%
 
 Splitting by elapsed time rather than by counting days also means a 23- or 25-hour daylight
 saving day gets its share adjusted automatically.
+
+### Flat or 3D
+
+The day-by-day chart has a **Flat / 3D** switch. 3D stands each day up as a block seen from
+above, built with CSS transforms — no library, no canvas. It is a second reading of the same
+one number per day rather than extra information, so the rows underneath always stay put and
+carry the actual figures; the switch only changes the chart. Your choice is remembered.
 
 ### The pace band
 

@@ -308,7 +308,110 @@
 
   /* ---- the day-by-day split -------------------------------------------- */
   .plan { margin-top: 1.75rem; }
-  .plan-title { margin-bottom: 0.875rem; }
+  .plan-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.875rem;
+  }
+  .plan-title { min-width: 0; }
+
+  /* ---- flat / 3D switch ------------------------------------------------ */
+  .view-toggle {
+    display: inline-flex;
+    flex: 0 0 auto;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    overflow: hidden;
+    background: #fff;
+  }
+  .view-toggle button {
+    font: 600 0.625rem/1 var(--sans);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--faint);
+    background: transparent;
+    border: 0;
+    padding: 0.4375rem 0.625rem;
+    cursor: pointer;
+  }
+  .view-toggle button[aria-pressed="true"] { background: var(--ink); color: var(--bone); }
+
+  /* ---- the skyline ----------------------------------------------------- */
+  .sky {
+    margin: 0.5rem 0 1.5rem;
+    padding-top: 1.5rem;              /* headroom for the tallest top face */
+    perspective: 760px;
+    /* Eye well above and a little to the right, so every block shows its top
+       and its right side rather than a sliver. */
+    perspective-origin: 82% -340px;
+  }
+  .sky-stage {
+    display: flex;
+    align-items: flex-end;
+    gap: 8%;
+    height: 8rem;
+    border-bottom: 1px solid var(--rule);   /* ground, so blocks do not float */
+    transform-style: preserve-3d;
+  }
+  .tower {
+    position: relative;
+    flex: 1 1 0;
+    height: var(--h);
+    min-height: 2px;
+    transform-style: preserve-3d;
+  }
+  .tower i {
+    position: absolute;
+    display: block;
+  }
+  .tower .f-front {
+    inset: 0;
+    background: var(--clay);
+  }
+  .tower .f-top {
+    left: 0; right: 0; top: 0;
+    height: var(--depth);
+    background: #EBA98F;
+    transform: rotateX(90deg);
+    transform-origin: top center;
+  }
+  .tower .f-side {
+    top: 0; right: 0;
+    width: var(--depth);
+    height: 100%;
+    background: #B85C3C;
+    transform: rotateY(-90deg);
+    transform-origin: right center;
+  }
+  .tower-today .f-front { background: var(--under); }
+  .tower-today .f-top   { background: #6FA98A; }
+  .tower-today .f-side  { background: #315F49; }
+
+  .sky-labels {
+    display: flex;
+    gap: 8%;
+    margin-top: 0.625rem;
+  }
+  .sky-labels span {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
+    font-size: 0.6875rem;
+    line-height: 1.35;
+    color: var(--faint);
+  }
+  .sky-labels b {
+    display: block;
+    font: 600 0.75rem var(--mono);
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* In 3D the skyline carries the shape, so the row bars would just repeat it. */
+  .plan-3d .day-bar { visibility: hidden; }
+
   .plan-note {
     margin: 0.75rem 0 0;
     font-size: 0.75rem;
@@ -515,6 +618,7 @@ import {
 } from "./pacer.js?v=5";
 
 const STORE_KEY = "claude-pace/v1";
+const VIEW_KEY = "claude-pace/view";
 const STALE_AFTER = 3 * HOUR_MS;
 
 const el = (id) => document.getElementById(id);
@@ -559,6 +663,12 @@ function save(entry) {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(entry)); } catch { /* not fatal */ }
 }
 
+// Flat is the default: it is the clearer read, and 3D is an opt-in.
+let planView = "flat";
+try {
+  if (localStorage.getItem(VIEW_KEY) === "3d") planView = "3d";
+} catch { /* private mode — stay flat */ }
+
 // ---- formatting -----------------------------------------------------------
 // One decimal, but never a bare ".0" — "48%" reads better than "48.0%".
 const num = (n) => (n === null ? "—" : String(Math.round(n * 10) / 10));
@@ -566,6 +676,7 @@ const escape = (s) => String(s).replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 const weekday = (ms) => new Date(ms).toLocaleDateString(undefined, { weekday: "long" });
+const weekdayShort = (ms) => new Date(ms).toLocaleDateString(undefined, { weekday: "short" });
 const shortDate = (ms) =>
   new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const clock = (ms) =>
@@ -626,8 +737,43 @@ function planHtml(reading, resetAt, now, costPerHour) {
        share also shows as hours you can spend.</p>`
     : "";
 
-  return `<div class="plan">
-      <div class="plan-title eyebrow">${escape(heading)}</div>${rows}${note}
+  const toggle = `
+    <div class="view-toggle" role="group" aria-label="Chart style">
+      <button type="button" data-view="flat" aria-pressed="${planView === "flat"}">Flat</button>
+      <button type="button" data-view="3d" aria-pressed="${planView === "3d"}">3D</button>
+    </div>`;
+
+  return `<div class="plan${planView === "3d" ? " plan-3d" : ""}">
+      <div class="plan-head">
+        <div class="plan-title eyebrow">${escape(heading)}</div>${toggle}
+      </div>
+      ${planView === "3d" ? skylineHtml(days, peak, now) : ""}
+      ${rows}${note}
+    </div>`;
+}
+
+// The same shares as the rows, stood up as blocks. Purely a second reading of
+// one number per day, so it is marked decorative and the rows keep the data.
+function skylineHtml(days, peak, now) {
+  const MAX_H = 108;   // px for the biggest day
+  const DEPTH = 16;    // px of apparent depth on every block
+
+  const towers = days.map((d, i) => {
+    const h = Math.max(2, Math.round((d.pct / peak) * MAX_H));
+    return `<div class="tower${i === 0 ? " tower-today" : ""}"
+                 style="--h:${h}px; --depth:${DEPTH}px">
+              <i class="f-top"></i><i class="f-side"></i><i class="f-front"></i>
+            </div>`;
+  }).join("");
+
+  const labels = days.map((d, i) => `
+    <span><b>${num(d.pct)}%</b>${escape(i === 0 ? "Today" : weekdayShort(d.startsAt))}</span>
+  `).join("");
+
+  return `
+    <div class="sky" aria-hidden="true">
+      <div class="sky-stage">${towers}</div>
+      <div class="sky-labels">${labels}</div>
     </div>`;
 }
 
@@ -881,6 +1027,16 @@ form.addEventListener("submit", (event) => {
   toggleBtn.hidden = false;
   clearBtn.hidden = false;
   showForm(false);
+  render();
+});
+
+// The plan is redrawn every second, so listen on the container that persists
+// rather than on buttons that are about to be replaced.
+results.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-view]");
+  if (!button) return;
+  planView = button.dataset.view === "3d" ? "3d" : "flat";
+  try { localStorage.setItem(VIEW_KEY, planView); } catch { /* not fatal */ }
   render();
 });
 
