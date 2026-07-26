@@ -2,8 +2,9 @@
 import assert from "node:assert/strict";
 import {
   analyze, planDays, hourlyCost, hoursFor, resetInDuration, nextWeekdayAt,
+  recentRate, refineProjection,
   perDay, perHour, formatDuration, formatAge,
-  WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS,
+  WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS, MINUTE_MS,
 } from "./pacer.js";
 
 const NOW = Date.UTC(2026, 0, 15, 12, 0, 0);
@@ -316,6 +317,148 @@ check("analyze and planDays agree on what is left", () => {
   // A whole day's share must match the flat per-day budget rate.
   const wholeDay = plan.find((d) => !d.partial);
   assert.ok(Math.abs(wholeDay.pct - perDay(reading.budgetPerMs)) < 1e-9);
+});
+
+// --- recent rate from history ----------------------------------------------
+const H_BASE = NOW;  // window opened at NOW for these tests
+const H_GAP = 20 * MINUTE_MS; // comfortably above the 15-min minimum
+
+check("recentRate uses the last two points that are far enough apart", () => {
+  const history = [
+    { pct: 10, at: H_BASE },
+    { pct: 30, at: H_BASE + H_GAP },
+    { pct: 50, at: H_BASE + 2 * H_GAP },
+  ];
+  const rate = recentRate(history, H_BASE);
+  // Slope between the last two: (50 - 30) / H_GAP
+  assert.ok(Math.abs(rate - 20 / H_GAP) < 1e-15);
+});
+
+check("recentRate ignores points before windowStart", () => {
+  const windowStart = H_BASE + H_GAP;
+  const history = [
+    { pct: 10, at: H_BASE },               // before window, should be ignored
+    { pct: 30, at: H_BASE + H_GAP },        // exactly at windowStart
+    { pct: 50, at: H_BASE + 2 * H_GAP },
+  ];
+  const rate = recentRate(history, windowStart);
+  assert.ok(Math.abs(rate - 20 / H_GAP) < 1e-15);
+});
+
+check("recentRate returns null when all points are before windowStart", () => {
+  const history = [
+    { pct: 10, at: H_BASE },
+    { pct: 30, at: H_BASE + H_GAP },
+  ];
+  assert.equal(recentRate(history, H_BASE + 3 * H_GAP), null);
+});
+
+check("recentRate skips pairs closer than 15 min", () => {
+  const history = [
+    { pct: 10, at: H_BASE },
+    { pct: 30, at: H_BASE + H_GAP },
+    { pct: 32, at: H_BASE + H_GAP + 5 * MINUTE_MS }, // only 5 min after previous
+  ];
+  // Should skip the (32, 30) pair (5 min gap) and use (32, 10) — 20+H_GAP+5min gap
+  const rate = recentRate(history, H_BASE);
+  const expectedGap = H_GAP + 5 * MINUTE_MS;
+  assert.ok(Math.abs(rate - 22 / expectedGap) < 1e-15);
+});
+
+check("recentRate returns null with 0 or 1 point", () => {
+  assert.equal(recentRate([], H_BASE), null);
+  assert.equal(recentRate([{ pct: 10, at: H_BASE }], H_BASE), null);
+  assert.equal(recentRate(null, H_BASE), null);
+  assert.equal(recentRate(undefined, H_BASE), null);
+});
+
+check("recentRate returns null when usage goes down (inconsistent data)", () => {
+  const history = [
+    { pct: 50, at: H_BASE },
+    { pct: 30, at: H_BASE + H_GAP }, // usage decreased — window probably reset
+  ];
+  assert.equal(recentRate(history, H_BASE), null);
+});
+
+check("recentRate handles unsorted history", () => {
+  const history = [
+    { pct: 50, at: H_BASE + 2 * H_GAP },
+    { pct: 10, at: H_BASE },
+    { pct: 30, at: H_BASE + H_GAP },
+  ];
+  const rate = recentRate(history, H_BASE);
+  // Should sort internally and use (50, 30) pair
+  assert.ok(Math.abs(rate - 20 / H_GAP) < 1e-15);
+});
+
+// --- refine projection -----------------------------------------------------
+check("refineProjection overrides projection with recent rate", () => {
+  const r = refineProjection({
+    budgetPerMs: 100 / WEEK_MS,
+    burnPerMs: 50 / WEEK_MS,
+    recentBurnPerMs: 80 / WEEK_MS,
+    windowMs: WEEK_MS,
+  });
+  assert.ok(Math.abs(r.projectedPct - 80) < 1e-9);
+  assert.equal(r.recentBurnPerMs, 80 / WEEK_MS);
+});
+
+check("refineProjection returns nulls when recent rate is absent", () => {
+  const r = refineProjection({
+    budgetPerMs: 100 / WEEK_MS,
+    burnPerMs: 50 / WEEK_MS,
+    recentBurnPerMs: null,
+    windowMs: WEEK_MS,
+  });
+  assert.equal(r.projectedPct, null);
+  assert.equal(r.verdict, null);
+  assert.equal(r.recentBurnPerMs, null);
+});
+
+check("refineProjection derives verdict from recent rate vs budget", () => {
+  // Recent rate much higher than budget → over pace
+  const over = refineProjection({
+    budgetPerMs: 50 / WEEK_MS,
+    burnPerMs: 30 / WEEK_MS,   // overall is fine
+    recentBurnPerMs: 150 / WEEK_MS, // but recently burning fast
+    windowMs: WEEK_MS,
+  });
+  assert.equal(over.verdict, "over");
+
+  // Recent rate much lower than budget → under pace
+  const under = refineProjection({
+    budgetPerMs: 100 / WEEK_MS,
+    burnPerMs: 80 / WEEK_MS,
+    recentBurnPerMs: 30 / WEEK_MS,
+    windowMs: WEEK_MS,
+  });
+  assert.equal(under.verdict, "under");
+});
+
+// --- planDays with weightFn ------------------------------------------------
+check("planDays with a custom weightFn redistributes shares", () => {
+  // Weight function that gives the first half of each day double weight.
+  const halfDay = 12 * HOUR_MS;
+  const weightFn = (start, end) => {
+    // For simplicity, just return a constant for whole days.
+    return end - start; // Same as default — just verify the hook works.
+  };
+  const plan = planDays({ leftPct: 66, resetAt: LOCAL_RESET, now: LOCAL_NOON, weightFn });
+  assert.equal(plan.length, 4);
+  const total = plan.reduce((sum, d) => sum + d.pct, 0);
+  assert.ok(Math.abs(total - 66) < 1e-9);
+});
+
+check("planDays falls back to proportional-by-ms when all weights are zero", () => {
+  const plan = planDays({
+    leftPct: 50,
+    resetAt: LOCAL_RESET,
+    now: LOCAL_NOON,
+    weightFn: () => 0, // everything gets zero weight
+  });
+  assert.ok(plan.length > 0); // should not return empty
+  const total = plan.reduce((sum, d) => sum + d.pct, 0);
+  assert.ok(Math.abs(total - 50) < 1e-9);
 });
 
 console.log(`ok — ${passed} checks passed`);

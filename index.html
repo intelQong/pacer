@@ -455,12 +455,13 @@
 <script type="module">
 import {
   analyze, planDays, hourlyCost, hoursFor, resetInDuration, nextWeekdayAt,
+  recentRate, refineProjection,
   perDay, perHour, formatDuration, formatAge,
-  WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS,
+  WEEK_MS, SESSION_MS, DAY_MS, HOUR_MS, MINUTE_MS,
 // Versioned so a cached pacer.js can never pair with a newer index.html. A
 // stale module means a missing export, which kills the whole page rather than
 // degrading it. Bump this whenever pacer.js changes.
-} from "./pacer.js?v=3";
+} from "./pacer.js?v=4";
 
 const STORE_KEY = "claude-pace/v1";
 const STALE_AFTER = 3 * HOUR_MS;
@@ -483,10 +484,22 @@ const WINDOWS = [
 ];
 
 // ---- storage --------------------------------------------------------------
+const HISTORY_CAP = 100;
+
 function load() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const entry = JSON.parse(raw);
+    // Migrate: older saves have no history array. Seed one from the single reading.
+    for (const key of ["weekly", "session"]) {
+      if (entry[key] && !Array.isArray(entry[key].history)) {
+        entry[key].history = entry.capturedAt
+          ? [{ pct: Number(entry[key].pct), at: entry.capturedAt }]
+          : [];
+      }
+    }
+    return entry;
   } catch {
     return null; // private mode or corrupt JSON — behave as if nothing was saved
   }
@@ -582,8 +595,21 @@ function renderCard(win, reading, now, costPerHour) {
     return r;
   }
 
+  // Layer recent-rate refinement over the baseline analysis.
+  const windowStart = reading.reset - win.windowMs;
+  const recent = recentRate(reading.history || [], windowStart);
+  const refined = refineProjection({
+    budgetPerMs: r.budgetPerMs,
+    burnPerMs: r.burnPerMs,
+    recentBurnPerMs: recent,
+    windowMs: win.windowMs,
+  });
+  // Use the refined verdict/projection when available, otherwise fall back.
+  const effectiveVerdict = refined.verdict ?? r.verdict;
+  const effectiveProjected = refined.projectedPct ?? r.projectedPct;
+
   const steady = r.elapsedFrac * 100;
-  const color = { under: "var(--under)", on: "var(--on)", over: "var(--over)" }[r.verdict];
+  const color = { under: "var(--under)", on: "var(--on)", over: "var(--over)" }[effectiveVerdict];
 
   if (r.state === "exhausted") {
     mount.innerHTML = head(`resets in ${formatDuration(r.remainingMs)}`) +
@@ -595,26 +621,38 @@ function renderCard(win, reading, now, costPerHour) {
 
   const budget = win.rate(r.budgetPerMs);
   const burn = win.rate(r.burnPerMs);
+  const recentBurn = recent !== null ? win.rate(recent) : null;
+
+  // When recent rate differs meaningfully from overall, note both.
+  const hasRecent = recentBurn !== null && burn !== null;
+  const rateNote = hasRecent
+    ? ` <span style="color:var(--faint);font-size:0.8125rem">(recently <b>${num(recentBurn)}%</b> ${win.unit})</span>`
+    : "";
+
   const status =
     burn === null
       ? `<span class="status-flat">This window just opened, so there is no rate to compare
          against yet. You have <b>${num(budget)}%</b> ${win.unit} to spend.</span>`
-      : r.verdict === "over"
-        ? `<span class="status-over">Over pace.</span> At <b>${num(burn)}%</b> ${win.unit}
+      : effectiveVerdict === "over"
+        ? `<span class="status-over">Over pace.</span> At <b>${num(burn)}%</b> ${win.unit}${rateNote}
            you run out before this resets. Ease down to <b>${num(budget)}%</b>
            ${win.unit} to make it.`
-        : r.verdict === "under"
+        : effectiveVerdict === "under"
           ? `<span class="status-under">Under pace.</span> You have been spending
-             <b>${num(burn)}%</b> ${win.unit}, so you can afford
+             <b>${num(burn)}%</b> ${win.unit}${rateNote}, so you can afford
              <b>${num(budget)}%</b> from here.`
           : `<span class="status-on">On pace.</span> Spending <b>${num(burn)}%</b>
-             ${win.unit} and <b>${num(budget)}%</b> ${win.unit} available — keep it steady.`;
+             ${win.unit}${rateNote} and <b>${num(budget)}%</b> ${win.unit} available — keep it steady.`;
+
+  const projLabel = effectiveProjected !== null
+    ? ` · on track for <b>${num(effectiveProjected)}%</b>${hasRecent ? " at recent pace" : ""}`
+    : "";
 
   mount.innerHTML =
     head(`resets in ${formatDuration(r.remainingMs)}`) +
     bandHtml(r.used, steady, color, win.ticks) +
     `<div class="band-legend">
-       <span><b>${num(r.used)}%</b> spent</span>
+       <span><b>${num(r.used)}%</b> spent${projLabel}</span>
        <span>steady pace would be <b>${Math.round(steady)}%</b> by now</span>
      </div>
      <p class="status">${status}</p>` +
@@ -678,8 +716,17 @@ function render() {
   const age = now - entry.capturedAt;
   const stale = el("stale");
   if (age > STALE_AFTER) {
+    // When a recent rate is available, extrapolate where usage likely sits now.
+    const wStart = entry.weekly.reset - WEEK_MS;
+    const rRate = recentRate(entry.weekly.history || [], wStart);
+    const extrapolated = rRate !== null
+      ? Math.min(100, Number(entry.weekly.pct) + rRate * age)
+      : null;
+    const drift = extrapolated !== null
+      ? ` At your recent pace it is likely around <b>${num(extrapolated)}%</b> by now.`
+      : "";
     stale.innerHTML = `This reading is <b>${formatAge(age)}</b> old. Usage only goes up, so
-      your real figure is higher than this and your daily share is smaller. Run
+      your real figure is higher than this and your daily share is smaller.${drift} Run
       <b>/usage</b> and update it.`;
     stale.hidden = false;
   } else {
@@ -722,14 +769,35 @@ form.addEventListener("submit", (event) => {
     return fail("A session resets within 5 hours. Check the hours and minutes.");
   }
 
+  // Carry forward any existing history, then append the new reading.
+  const prev = load();
+
+  function buildHistory(key, pctStr, resetAt, windowMs) {
+    const windowStart = resetAt - windowMs;
+    const pctNum = Number(pctStr);
+    // Start from previous history (if any), prune entries outside the current
+    // window, push the new point, and cap the array.
+    let hist = (prev && prev[key] && Array.isArray(prev[key].history))
+      ? prev[key].history.filter((h) => Number.isFinite(h.at) && h.at >= windowStart)
+      : [];
+    if (Number.isFinite(pctNum)) hist.push({ pct: pctNum, at: now });
+    if (hist.length > HISTORY_CAP) hist = hist.slice(-HISTORY_CAP);
+    return hist;
+  }
+
   const entry = {
     weekly: {
       pct: data.get("weeklyPct"),
       reset: weeklyReset,
       weekday: data.get("weeklyWeekday"),
       time: data.get("weeklyTime"),
+      history: buildHistory("weekly", data.get("weeklyPct"), weeklyReset, WEEK_MS),
     },
-    session: { pct: data.get("sessionPct"), reset: sessionReset },
+    session: {
+      pct: data.get("sessionPct"),
+      reset: sessionReset,
+      history: buildHistory("session", data.get("sessionPct"), sessionReset, SESSION_MS),
+    },
     hoursUsed: data.get("hoursUsed"), // optional; blank means percentages only
     capturedAt: now,
   };

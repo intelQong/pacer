@@ -11,6 +11,9 @@ export const MINUTE_MS = 60 * 1000;
 // counting as "on pace". Relative, so it means the same thing on both windows.
 const PACE_TOLERANCE = 0.05;
 
+// Two readings closer together than this are too noisy for a reliable slope.
+const RECENT_MIN_GAP_MS = 15 * MINUTE_MS;
+
 /**
  * Work out where you stand in a usage window.
  *
@@ -186,6 +189,60 @@ export function hoursFor(pct, costPerHour) {
   return pct / costPerHour;
 }
 
+/**
+ * Derive a burn rate from the two most recent readings in a history array.
+ *
+ * Each entry is { pct, at } where `pct` is the usage percentage and `at` is
+ * the timestamp when it was captured. Only entries within the current window
+ * (at >= windowStart) count — older ones belong to a previous reset cycle.
+ *
+ * Returns the rate per millisecond, or null if there are not enough points or
+ * the two most recent are too close together (< 15 min apart) to be reliable.
+ */
+export function recentRate(history, windowStart) {
+  if (!Array.isArray(history) || history.length < 2) return null;
+
+  // Keep only points in the current window, sorted newest first.
+  const pts = history
+    .filter((h) => Number.isFinite(h.pct) && Number.isFinite(h.at) && h.at >= windowStart)
+    .sort((a, b) => b.at - a.at);
+
+  // Walk backwards from the most recent point to find a partner far enough away.
+  if (pts.length < 2) return null;
+  const latest = pts[0];
+  for (let i = 1; i < pts.length; i++) {
+    const gap = latest.at - pts[i].at;
+    if (gap >= RECENT_MIN_GAP_MS) {
+      const delta = latest.pct - pts[i].pct;
+      // Usage should not go down within a window. If it does the data is
+      // inconsistent (e.g. a window rolled over mid-history). Bail out.
+      if (delta < 0) return null;
+      return delta / gap;
+    }
+  }
+  return null; // every pair is too close together
+}
+
+/**
+ * Layer a recent-rate projection over the output of analyze().
+ *
+ * When a recent burn rate is available (from two or more readings) it gives a
+ * sharper projection than the overall average because it captures what the user
+ * is doing *now*, not what they did two days ago.
+ *
+ * Returns { recentBurnPerMs, projectedPct, verdict }. Any field may be null if
+ * there is not enough data, in which case the caller should fall back to the
+ * original values from analyze().
+ */
+export function refineProjection({ budgetPerMs, burnPerMs, recentBurnPerMs, windowMs }) {
+  if (recentBurnPerMs === null || recentBurnPerMs === undefined) {
+    return { recentBurnPerMs: null, projectedPct: null, verdict: null };
+  }
+  const projectedPct = recentBurnPerMs * windowMs;
+  const verdict = paceVerdict(budgetPerMs, recentBurnPerMs);
+  return { recentBurnPerMs, projectedPct, verdict };
+}
+
 /** Local midnight at the end of the calendar day containing `ms`. */
 function nextMidnight(ms) {
   const d = new Date(ms);
@@ -205,32 +262,40 @@ function nextMidnight(ms) {
  *
  * Shares sum to `leftPct` exactly, up to floating point.
  */
-export function planDays({ leftPct, resetAt, now = Date.now(), maxDays = 14 }) {
+export function planDays({ leftPct, resetAt, now = Date.now(), maxDays = 14, weightFn }) {
   const left = Number(leftPct);
   const end = resetAt instanceof Date ? resetAt.getTime() : new Date(resetAt).getTime();
 
   if (!Number.isFinite(left) || left <= 0) return [];
   if (!Number.isFinite(end) || end <= now) return [];
 
-  const totalMs = end - now;
-  const days = [];
+  // First pass: gather raw segments at each midnight boundary.
+  const segs = [];
   let cursor = now;
-
-  while (cursor < end && days.length < maxDays) {
+  while (cursor < end && segs.length < maxDays) {
     const dayEnd = Math.min(nextMidnight(cursor), end);
-    const ms = dayEnd - cursor;
-    days.push({
-      startsAt: cursor,
-      endsAt: dayEnd,
-      ms,
-      hours: ms / HOUR_MS,
-      pct: (left * ms) / totalMs,
-      partial: ms < DAY_MS - 1000, // a stub of a day at either end
-    });
+    segs.push({ startsAt: cursor, endsAt: dayEnd, ms: dayEnd - cursor });
     cursor = dayEnd;
   }
 
-  return days;
+  // Weigh each segment. Default weight is wall-clock ms (current behaviour).
+  const weight = typeof weightFn === "function" ? weightFn : (s, e) => e - s;
+  const weights = segs.map((s) => Math.max(0, weight(s.startsAt, s.endsAt)));
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+
+  // If every segment has zero weight, fall back to proportional-by-ms so we
+  // never return an empty plan when there is time and quota remaining.
+  const fallback = totalWeight === 0;
+  const totalMs = end - now;
+
+  return segs.map((s, i) => ({
+    startsAt: s.startsAt,
+    endsAt: s.endsAt,
+    ms: s.ms,
+    hours: s.ms / HOUR_MS,
+    pct: fallback ? (left * s.ms) / totalMs : (left * weights[i]) / totalWeight,
+    partial: s.ms < DAY_MS - 1000,
+  }));
 }
 
 /** "2d 18h", "4h 05m", "12m" — coarse on purpose, it is a countdown not a stopwatch. */
