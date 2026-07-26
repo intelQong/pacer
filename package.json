@@ -1,0 +1,5 @@
+{
+  "name": "claude-usage-pacer",
+  "private": true,
+  "type": "module"
+}
