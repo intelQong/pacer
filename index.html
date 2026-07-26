@@ -31,6 +31,10 @@
 
   * { box-sizing: border-box; }
 
+  /* Any class that sets `display` outranks the UA stylesheet's [hidden] rule,
+     so state it once here rather than per component. */
+  [hidden] { display: none !important; }
+
   body {
     margin: 0;
     padding: 2.5rem 1.25rem 4rem;
@@ -80,7 +84,6 @@
     letter-spacing: -0.017em;
     text-wrap: balance;
   }
-  .thesis[hidden] { display: none; }
   .thesis strong {
     font-weight: 400;
     color: var(--clay);
@@ -128,7 +131,6 @@
     border: 1px solid var(--rule);
     border-radius: 10px;
   }
-  .readings[hidden] { display: none; }
   .readings-intro {
     margin: 0 0 1.25rem;
     font-size: 0.875rem;
@@ -176,7 +178,6 @@
     font-size: 0.875rem;
     color: var(--over);
   }
-  .form-error[hidden] { display: none; }
 
   /* ---- window sections ------------------------------------------------- */
   .card {
@@ -287,9 +288,7 @@
     font-size: 0.875rem;
     line-height: 1.55;
   }
-  .stale[hidden] { display: none; }
   .stale b { font-family: var(--mono); }
-  .results[hidden] { display: none; }
 
   .colophon {
     margin-top: 3.5rem;
