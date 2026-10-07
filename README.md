@@ -1,4 +1,4 @@
-# Pace
+# Pacer
 
 ### → [intelqong.github.io/claude-usage-pacer](https://intelqong.github.io/pacer/)
 
