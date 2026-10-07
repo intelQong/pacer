@@ -1,6 +1,6 @@
 # Pace
 
-### → [intelqong.github.io/claude-usage-pacer](https://intelqong.github.io/claude-usage-pacer/)
+### → [intelqong.github.io/claude-usage-pacer](https://intelqong.github.io/pacer/)
 
 Work out how much Claude you can use each day to stay inside your **5-hour session**
 limit and your **weekly** limit.
